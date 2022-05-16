@@ -11,31 +11,65 @@ export function getVitestPath(projectRoot: string): string | undefined {
   }
 
   if (existsSync(path.resolve(node_modules, "vitest", "vitest.mjs"))) {
-    return path.resolve(node_modules, "vitest", "vitest.mjs");
+    return sanitizeFilePath(path.resolve(node_modules, "vitest", "vitest.mjs"));
   }
 
   const suffixes = [".js", "", ".cmd"];
   for (const suffix of suffixes) {
     if (existsSync(path.resolve(node_modules, ".bin", "vitest" + suffix))) {
-      return path.resolve(node_modules, ".bin", "vitest" + suffix);
+      return sanitizeFilePath(
+        path.resolve(node_modules, ".bin", "vitest" + suffix),
+      );
     }
   }
 
   return;
 }
 
-export async function getVitestVersion(vitestPath?: string): Promise<string> {
+export function getVitestCommand(
+  projectRoot: string,
+): { cmd: string; args: string[] } | undefined {
+  const node_modules = path.resolve(projectRoot, "node_modules");
+  if (!existsSync(node_modules)) {
+    return;
+  }
+
+  const suffixes = [""];
+  if (isWindows) {
+    suffixes.unshift(".cmd", ".CMD");
+  }
+
+  for (const suffix of suffixes) {
+    if (existsSync(path.resolve(node_modules, ".bin", "vitest" + suffix))) {
+      return {
+        cmd: path.resolve(node_modules, ".bin", "vitest" + suffix),
+        args: [],
+      };
+    }
+  }
+
+  if (existsSync(path.resolve(node_modules, "vitest", "vitest.mjs"))) {
+    return {
+      cmd: "node",
+      args: [
+        sanitizeFilePath(path.resolve(node_modules, "vitest", "vitest.mjs")),
+      ],
+    };
+  }
+
+  return;
+}
+
+export async function getVitestVersion(
+  vitestCommand?: { cmd: string; args: string[] },
+): Promise<string> {
   let process;
-  if (vitestPath == null) {
+  if (vitestCommand == null) {
     process = spawn("npx", ["vitest", "-v"], {
       stdio: ["ignore", "pipe", "pipe"],
     });
-  } else if (vitestPath.endsWith("js") && isWindows) {
-    process = spawn("node", [vitestPath, "-v"], {
-      stdio: ["ignore", "pipe", "pipe"],
-    });
   } else {
-    process = spawn(vitestPath, ["-v"], {
+    process = spawn(vitestCommand.cmd, [...vitestCommand.args, "-v"], {
       stdio: ["ignore", "pipe", "pipe"],
     });
   }
@@ -45,5 +79,21 @@ export async function getVitestVersion(vitestPath?: string): Promise<string> {
     return line.match(/vitest\/(\d+.\d+.\d+)/)![1];
   }
 
-  throw new Error(`Cannot get vitest version from "${vitestPath}"`);
+  throw new Error(`Cannot get vitest version from "${vitestCommand}"`);
+}
+
+const capitalizeFirstLetter = (string: string) =>
+  string.charAt(0).toUpperCase() + string.slice(1);
+
+const replaceDoubleSlashes = (string: string) => string.replace(/\\/g, "/");
+
+export function sanitizeFilePath(path: string) {
+  if (isWindows) {
+    return capitalizeFirstLetter(replaceDoubleSlashes(path));
+  }
+  return path;
+}
+
+export function filterColorFormatOutput(s: string): string {
+  return s.replace(/\u001b\[\d+m/g, "");
 }

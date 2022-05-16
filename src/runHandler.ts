@@ -1,22 +1,26 @@
 import * as vscode from "vscode";
 import {
-  adaptWindowsFilePath,
   FormattedTestResults,
   getNodeVersion,
   getTempPath,
   TestRunner,
 } from "./pure/runner";
-import { getVitestPath as getVitestPath } from "./pure/utils";
+import {
+  getVitestCommand,
+  getVitestPath,
+  sanitizeFilePath,
+} from "./pure/utils";
+import { relative } from "path";
 import {
   getAllTestCases,
   getTestCaseId,
   TestFile,
+  testItemIdMap,
   WEAKMAP_TEST_DATA,
 } from "./TestData";
 import { getConfig } from "./config";
 import { readFile } from "fs-extra";
 import { existsSync } from "fs";
-import { isWindows } from "./pure/platform";
 
 export async function runHandler(
   ctrl: vscode.TestController,
@@ -32,12 +36,37 @@ export async function runHandler(
 
   const runner = new TestRunner(
     vscode.workspace.workspaceFolders[0].uri.fsPath,
-    getVitestPath(vscode.workspace.workspaceFolders[0].uri.fsPath),
+    getVitestCommand(vscode.workspace.workspaceFolders[0].uri.fsPath),
   );
 
   const tests = request.include ?? gatherTestItems(ctrl.items);
   const run = ctrl.createTestRun(request);
-  await runTest(ctrl, runner, run, tests);
+  await runTest(ctrl, runner, run, tests, "run");
+  run.end();
+}
+
+export async function updateSnapshot(
+  ctrl: vscode.TestController,
+  test: vscode.TestItem,
+) {
+  if (
+    vscode.workspace.workspaceFolders === undefined ||
+    vscode.workspace.workspaceFolders.length === 0
+  ) {
+    return;
+  }
+
+  test = testItemIdMap.get(ctrl)!.get(test.id)!;
+  const runner = new TestRunner(
+    vscode.workspace.workspaceFolders[0].uri.fsPath,
+    getVitestCommand(vscode.workspace.workspaceFolders[0].uri.fsPath),
+  );
+
+  const request = new vscode.TestRunRequest([test]);
+  const tests = [test];
+  const run = ctrl.createTestRun(request);
+  run.started(test);
+  await runTest(ctrl, runner, run, tests, "update");
   run.end();
 }
 
@@ -54,7 +83,7 @@ export async function debugHandler(
 
   const tests = request.include ?? gatherTestItems(ctrl.items);
   const run = ctrl.createTestRun(request);
-  await runTest(ctrl, undefined, run, tests, true);
+  await runTest(ctrl, undefined, run, tests, "debug");
   run.end();
 }
 
@@ -64,14 +93,15 @@ function gatherTestItems(collection: vscode.TestItemCollection) {
   return items;
 }
 
+type Mode = "debug" | "run" | "update";
 async function runTest(
   ctrl: vscode.TestController,
   runner: TestRunner | undefined,
   run: vscode.TestRun,
   items: readonly vscode.TestItem[],
-  isDebug = false,
+  mode: Mode,
 ) {
-  if (!isDebug && runner === undefined) {
+  if (mode !== "debug" && runner === undefined) {
     throw new Error("should provide runner if not debug");
   }
 
@@ -120,20 +150,24 @@ async function runTest(
 
   const pathToFile = new Map<string, vscode.TestItem>();
   for (const file of fileItems) {
-    pathToFile.set(file.uri!.fsPath, file);
-    if (isWindows) {
-      let windowsPath = file.uri!.fsPath.replace(/\\/g, "/");
-      // vscode sends path with lowercase for drive, but tests report with uppercase
-      // so there are no matches unless this is adjusted
-      windowsPath = windowsPath.charAt(0).toUpperCase() + windowsPath.slice(1);
-      pathToFile.set(windowsPath, file);
-    }
+    pathToFile.set(sanitizeFilePath(file.uri!.fsPath), file);
   }
 
   let out;
 
   try {
-    if (!isDebug) {
+    if (mode === "debug") {
+      out = await debugTest(vscode.workspace.workspaceFolders![0], run, items);
+    } else {
+      let command = undefined;
+      if (config.commandLine) {
+        const commandLine = config.commandLine.trim();
+        command = {
+          cmd: commandLine.split(" ")[0],
+          args: commandLine.split(" ").slice(1),
+        };
+      }
+
       out = await runner!.scheduleRun(
         fileItems.map((x) => x.uri!.fsPath),
         items.length === 1
@@ -143,10 +177,9 @@ async function runTest(
           ? (msg) => run.appendOutput(msg, undefined, items[0])
           : (msg) => run.appendOutput(msg),
         config.env || undefined,
-        config.commandLine ? config.commandLine.trim().split(" ") : undefined,
+        command,
+        mode === "update",
       );
-    } else {
-      out = await debugTest(vscode.workspace.workspaceFolders![0], run, items);
     }
   } catch (e) {
     console.error(e);
@@ -170,7 +203,7 @@ async function runTest(
       (fileResult) => {
         fileResult.assertionResults.forEach((result, index) => {
           const id = getTestCaseId(
-            pathToFile.get(fileResult.name)!,
+            pathToFile.get(sanitizeFilePath(fileResult.name))!,
             result.fullName.trim(),
           ) || "";
           const child = testItemIdMap.get(id)!;
@@ -203,8 +236,7 @@ async function runTest(
         testCase,
         new vscode.TestMessage(
           `Test result not found. \r\n` +
-            `Can you run vitest successfully on this file? Does it need custom option to run?\r\n` +
-            `Does this file contain test case with the same name? \r\n`,
+            `Can you run vitest successfully on this file? Does it need custom option to run?`,
         ),
       );
       run.appendOutput(`Cannot find test ${testCase.id}`);
@@ -214,7 +246,7 @@ async function runTest(
       run.errored(
         testCase,
         new vscode.TestMessage(
-          "Unexpected condition. Please report the bug to https://github.com/zxch3n/vitest-explorer/issues",
+          "Unexpected condition. Please report the bug to https://github.com/vitest-dev/vscode/issues",
         ),
       );
     });
@@ -241,7 +273,14 @@ async function debugTest(
   const testData = testItems.map((item) => WEAKMAP_TEST_DATA.get(item)!);
   config.args = [
     "run",
-    ...new Set(testData.map((x) => x.getFilePath()).map(adaptWindowsFilePath)),
+    ...new Set(
+      testData.map((x) =>
+        relative(workspaceFolder.uri.fsPath, x.getFilePath()).replace(
+          /\\/g,
+          "/",
+        )
+      ),
+    ),
     testData.length === 1 ? "--testNamePattern" : "",
     testData.length === 1 ? testData[0].getFullPattern() : "",
     "--reporter=default",
@@ -264,7 +303,9 @@ async function debugTest(
             setTimeout(async () => {
               if (!existsSync(outputFilePath)) {
                 const prefix = `When running:\r\n` +
-                  `    ${config.program + " " + config.args.join(" ")}\r\n` +
+                  `    node ${
+                    config.program + " " + config.args.join(" ")
+                  }\r\n` +
                   `cwd: ${workspaceFolder.uri.fsPath}\r\n` +
                   `node: ${await getNodeVersion()}` +
                   `env.PATH: ${process.env.PATH}`;

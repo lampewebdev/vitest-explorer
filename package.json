@@ -2,7 +2,7 @@
   "name": "vitest-explorer",
   "displayName": "Vitest",
   "description": "Run and debug Vitest test cases",
-  "version": "0.1.16",
+  "version": "0.1.27",
   "icon": "img/icon.png",
   "preview": true,
   "author": "zxch3n",
@@ -10,10 +10,10 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/zxch3n/vitest-explorer.git"
+    "url": "https://github.com/vitest-dev/vscode.git"
   },
   "bugs": {
-    "url": "https://github.com/zxch3n/vitest-explorer/issues"
+    "url": "https://github.com/vitest-dev/vscode/issues"
   },
   "keywords": [
     "vitest",
@@ -34,6 +34,26 @@
   ],
   "main": "./out/extension.js",
   "contributes": {
+    "commands": [
+      {
+        "title": "Update Snapshot",
+        "command": "vitest.updateSnapshot",
+        "category": "Vitest"
+      }
+    ],
+    "menus": {
+      "commandPalette": [
+        {
+          "command": "vitest.updateSnapshot",
+          "when": "false"
+        }
+      ],
+      "testing/item/context": [
+        {
+          "command": "vitest.updateSnapshot"
+        }
+      ]
+    },
     "configuration": {
       "title": "Vitest",
       "properties": {
@@ -105,7 +125,7 @@
     "prettier": "^2.5.1",
     "typescript": "^4.5.5",
     "vite": "^2.8.6",
-    "vitest": "^0.6.2"
+    "vitest": "latest"
   },
   "dependencies": {
     "@babel/parser": "^7.17.3",
